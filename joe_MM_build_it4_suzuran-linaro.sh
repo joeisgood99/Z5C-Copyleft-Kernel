@@ -49,7 +49,7 @@ zip -r Linaro-Z5C_Joeisgood99_v.zip Linaro-253boot.img META-INF
 rm -f boot.img
 
 ### Version number
-#echo -n "Enter version number: "
+echo -n "Enter version number: "
 #read version
 
 mv /home/ben/development/kernel/kernel-Source-Code/final_files/Linaro-Z5C_Joeisgood99_v.zip  /home/ben/development/kernel/kernel-Source-Code/final_files/Linaro-Z5C_Joeisgood99_v$version.zip
