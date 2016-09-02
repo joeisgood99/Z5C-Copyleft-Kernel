@@ -295,12 +295,19 @@ struct ac_ops {
 	void (*get_cpu_frequency_table)(int cpu);
 	void (*get_cpu_frequency_table_minmax)(struct cpufreq_policy *policy, 
 			int cpu);
-	void (*set_cpu_cached_tuners)(struct cpufreq_policy *policy, 
-			int cpu);
-	void (*get_cpu_cached_tuners)(struct cpufreq_policy *policy, 
-			int cpu);
 };
 
+<<<<<<< HEAD
+=======
+struct dk_ops {
+	void (*get_cpu_frequency_table)(int cpu);
+};
+
+struct nm_ops {
+	void (*get_cpu_frequency_table)(int cpu);
+};
+
+>>>>>>> 6ac9efa... alucard, darkness and nightmare cpu govs: Enhanced store and restore tuners settings when hotplugging cpus!
 static inline int delay_for_sampling_rate(unsigned int sampling_rate)
 {
 	int delay = usecs_to_jiffies(sampling_rate);
