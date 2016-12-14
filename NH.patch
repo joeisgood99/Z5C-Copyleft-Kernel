@@ -1,0 +1,1222 @@
+From db30cb139a64ef9748038feeef42a5145aedccf6 Mon Sep 17 00:00:00 2001
+From: Tomoms <fondatommaso2@gmail.com>
+Date: Mon, 16 May 2016 20:35:27 +0200
+Subject: [PATCH 1/3] Use device as USB keyboard Original code:
+ https://github.com/pelya/android-keyboard-gadget
+
+---
+ drivers/usb/gadget/Makefile                 |   2 +-
+ drivers/usb/gadget/android.c                |  46 +++++++++++++
+ drivers/usb/gadget/f_hid.c                  | 100 ++++++++++++++++++++++++++--
+ drivers/usb/gadget/f_hid.h                  |  16 +++++
+ drivers/usb/gadget/f_hid_android_keyboard.c |  44 ++++++++++++
+ drivers/usb/gadget/f_hid_android_mouse.c    |  40 +++++++++++
+ 6 files changed, 242 insertions(+), 6 deletions(-)
+ create mode 100644 drivers/usb/gadget/f_hid.h
+ create mode 100644 drivers/usb/gadget/f_hid_android_keyboard.c
+ create mode 100644 drivers/usb/gadget/f_hid_android_mouse.c
+
+diff --git a/drivers/usb/gadget/Makefile b/drivers/usb/gadget/Makefile
+index c608227..8c3f31d 100644
+--- a/drivers/usb/gadget/Makefile
++++ b/drivers/usb/gadget/Makefile
+@@ -67,7 +67,7 @@ g_nokia-y			:= nokia.o
+ g_webcam-y			:= webcam.o
+ g_ncm-y				:= ncm.o
+ g_acm_ms-y			:= acm_ms.o
+-g_android-y			:= android.o
++g_android-y			:= android.o f_hid.o
+ g_tcm_usb_gadget-y		:= tcm_usb_gadget.o
+ 
+ obj-$(CONFIG_USB_ZERO)		+= g_zero.o
+diff --git a/drivers/usb/gadget/android.c b/drivers/usb/gadget/android.c
+index 08952b3..04ceb23 100644
+--- a/drivers/usb/gadget/android.c
++++ b/drivers/usb/gadget/android.c
+@@ -77,8 +77,14 @@ static void eject_cdrom_timer_work(struct work_struct *w);
+ #include "f_ccid.c"
+ #include "f_mtp.c"
+ #include "f_accessory.c"
++#include "f_hid.h"
++#include "f_hid_android_keyboard.c"
++#include "f_hid_android_mouse.c"
+ #include "f_rndis.c"
+ #include "rndis.c"
++#include "u_ether.c"
++#include "u_bam_data.c"
++#include "f_mbim.c"
+ #include "f_qc_ecm.c"
+ #include "f_mbim.c"
+ #include "f_qc_rndis.c"
+@@ -3034,6 +3040,43 @@ static struct android_usb_function midi_function = {
+ 	.attributes	= midi_function_attributes,
+ };
+ #endif
++
++static int hid_function_init(struct android_usb_function *f, struct usb_composite_dev *cdev)
++{
++	return ghid_setup(cdev->gadget, 2);
++}
++
++static void hid_function_cleanup(struct android_usb_function *f)
++{
++	ghid_cleanup();
++}
++
++static int hid_function_bind_config(struct android_usb_function *f, struct usb_configuration *c)
++{
++	int ret;
++	printk(KERN_INFO "hid keyboard\n");
++	ret = hidg_bind_config(c, &ghid_device_android_keyboard, 0);
++	if (ret) {
++		pr_info("%s: hid_function_bind_config keyboard failed: %d\n", __func__, ret);
++		return ret;
++	}
++	printk(KERN_INFO "hid mouse\n");
++	ret = hidg_bind_config(c, &ghid_device_android_mouse, 1);
++	if (ret) {
++		pr_info("%s: hid_function_bind_config mouse failed: %d\n", __func__, ret);
++		return ret;
++	}
++	return 0;
++}
++
++static struct android_usb_function hid_function = {
++	.name		= "hid",
++	.init		= hid_function_init,
++	.cleanup	= hid_function_cleanup,
++	.bind_config	= hid_function_bind_config,
++
++};
++
+ static struct android_usb_function *supported_functions[] = {
+ 	&ffs_function,
+ 	&mbim_function,
+@@ -3061,6 +3104,7 @@ static struct android_usb_function *supported_functions[] = {
+ #ifdef CONFIG_SND_PCM
+ 	&audio_source_function,
+ #endif
++	&hid_function,
+ 	&uasp_function,
+ 	&charger_function,
+ #ifdef CONFIG_SND_RAWMIDI
+@@ -3422,6 +3466,8 @@ functions_store(struct device *pdev, struct device_attribute *attr,
+ 				pr_err("android_usb: Cannot enable '%s' (%d)",
+ 							name, err);
+ 		}
++		/* HID driver always enabled, it's the whole point of this kernel patch */
++		android_enable_function(dev, conf, "hid");
+ 	}
+ 
+ 	/* Free uneeded configurations if exists */
+diff --git a/drivers/usb/gadget/f_hid.c b/drivers/usb/gadget/f_hid.c
+index 6e69a8e..9554c10 100644
+--- a/drivers/usb/gadget/f_hid.c
++++ b/drivers/usb/gadget/f_hid.c
+@@ -17,8 +17,10 @@
+ #include <linux/poll.h>
+ #include <linux/uaccess.h>
+ #include <linux/wait.h>
++#include <linux/delay.h>
+ #include <linux/sched.h>
+ #include <linux/usb/g_hid.h>
++#include "f_hid.h"
+ 
+ static int major, minors;
+ static struct class *hidg_class;
+@@ -60,6 +62,43 @@ struct f_hidg {
+ 	struct usb_ep			*out_ep;
+ };
+ 
++/* Hacky device list to fix f_hidg_write being called after device destroyed.
++   It covers only most common race conditions, there will be rare crashes anyway. */
++enum { HACKY_DEVICE_LIST_SIZE = 4 };
++static struct f_hidg *hacky_device_list[HACKY_DEVICE_LIST_SIZE];
++static void hacky_device_list_add(struct f_hidg *hidg)
++{
++	int i;
++	for (i = 0; i < HACKY_DEVICE_LIST_SIZE; i++) {
++		if (!hacky_device_list[i]) {
++			hacky_device_list[i] = hidg;
++			return;
++		}
++	}
++	pr_err("%s: too many devices, not adding device %p\n", __func__, hidg);
++}
++static void hacky_device_list_remove(struct f_hidg *hidg)
++{
++	int i;
++	for (i = 0; i < HACKY_DEVICE_LIST_SIZE; i++) {
++		if (hacky_device_list[i] == hidg) {
++			hacky_device_list[i] = NULL;
++			return;
++		}
++	}
++	pr_err("%s: cannot find device %p\n", __func__, hidg);
++}
++static int hacky_device_list_check(struct f_hidg *hidg)
++{
++	int i;
++	for (i = 0; i < HACKY_DEVICE_LIST_SIZE; i++) {
++		if (hacky_device_list[i] == hidg) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
+ static inline struct f_hidg *func_to_hidg(struct usb_function *f)
+ {
+ 	return container_of(f, struct f_hidg, func);
+@@ -176,6 +215,11 @@ static ssize_t f_hidg_read(struct file *file, char __user *buffer,
+ 	if (!access_ok(VERIFY_WRITE, buffer, count))
+ 		return -EFAULT;
+ 
++	if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to read from device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
+ 	spin_lock_irqsave(&hidg->spinlock, flags);
+ 
+ #define READ_COND (!list_empty(&hidg->completed_out_req))
+@@ -246,6 +290,11 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 	if (!access_ok(VERIFY_READ, buffer, count))
+ 		return -EFAULT;
+ 
++	if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to write to device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
+ 	mutex_lock(&hidg->lock);
+ 
+ #define WRITE_COND (!hidg->write_pending)
+@@ -260,6 +309,11 @@ static ssize_t f_hidg_write(struct file *file, const char __user *buffer,
+ 				hidg->write_queue, WRITE_COND))
+ 			return -ERESTARTSYS;
+ 
++		if (hacky_device_list_check(hidg)) {
++			pr_err("%s: trying to write to device %p that was destroyed\n", __func__, hidg);
++			return -EIO;
++		}
++
+ 		mutex_lock(&hidg->lock);
+ 	}
+ 
+@@ -300,7 +354,18 @@ static unsigned int f_hidg_poll(struct file *file, poll_table *wait)
+ 	struct f_hidg	*hidg  = file->private_data;
+ 	unsigned int	ret = 0;
+ 
++	if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to poll device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
+ 	poll_wait(file, &hidg->read_queue, wait);
++
++	if (hacky_device_list_check(hidg)) {
++		pr_err("%s: trying to poll device %p that was destroyed\n", __func__, hidg);
++		return -EIO;
++	}
++
+ 	poll_wait(file, &hidg->write_queue, wait);
+ 
+ 	if (WRITE_COND)
+@@ -399,7 +464,12 @@ static int hidg_setup(struct usb_function *f,
+ 	case ((USB_DIR_IN | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+ 		  | HID_REQ_GET_PROTOCOL):
+ 		VDBG(cdev, "get_protocol\n");
+-		goto stall;
++		length = min_t(unsigned, length, 1);
++		if (hidg->bInterfaceSubClass == USB_INTERFACE_SUBCLASS_BOOT)
++			((u8 *) req->buf)[0] = 0;	/* Boot protocol */
++		else
++			((u8 *) req->buf)[0] = 1;	/* Report protocol */
++		goto respond;
+ 		break;
+ 
+ 	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+@@ -411,6 +481,14 @@ static int hidg_setup(struct usb_function *f,
+ 	case ((USB_DIR_OUT | USB_TYPE_CLASS | USB_RECIP_INTERFACE) << 8
+ 		  | HID_REQ_SET_PROTOCOL):
+ 		VDBG(cdev, "set_protocol\n");
++		length = 0;
++		if (hidg->bInterfaceSubClass == USB_INTERFACE_SUBCLASS_BOOT) {
++			if (value == 0)		/* Boot protocol */
++				goto respond;
++		} else {
++			if (value == 1)		/* Report protocol */
++				goto respond;
++		}
+ 		goto stall;
+ 		break;
+ 
+@@ -560,13 +638,15 @@ const struct file_operations f_hidg_fops = {
+ 	.llseek		= noop_llseek,
+ };
+ 
+-static int __init hidg_bind(struct usb_configuration *c, struct usb_function *f)
++static int hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct usb_ep		*ep;
+ 	struct f_hidg		*hidg = func_to_hidg(f);
+ 	int			status;
+ 	dev_t			dev;
+ 
++	pr_info("%s: creating device %p\n", __func__, hidg);
++
+ 	/* allocate instance-specific interface IDs, and patch descriptors */
+ 	status = usb_interface_id(c, f);
+ 	if (status < 0)
+@@ -632,6 +712,7 @@ static int __init hidg_bind(struct usb_configuration *c, struct usb_function *f)
+ 		goto fail;
+ 
+ 	device_create(hidg_class, NULL, dev, NULL, "%s%d", "hidg", hidg->minor);
++	hacky_device_list_add(hidg);
+ 
+ 	return 0;
+ 
+@@ -651,12 +732,21 @@ static void hidg_unbind(struct usb_configuration *c, struct usb_function *f)
+ {
+ 	struct f_hidg *hidg = func_to_hidg(f);
+ 
++	pr_info("%s: destroying device %p\n", __func__, hidg);
++	/* This does not cover all race conditions, only most common one */
++	mutex_lock(&hidg->lock);
++	hacky_device_list_remove(hidg);
++	mutex_unlock(&hidg->lock);
++
+ 	device_destroy(hidg_class, MKDEV(major, hidg->minor));
+ 	cdev_del(&hidg->cdev);
+ 
+ 	/* disable/free request and end point */
+ 	usb_ep_disable(hidg->in_ep);
+-	usb_ep_dequeue(hidg->in_ep, hidg->req);
++	/* TODO: calling this function crash kernel,
++	   not calling this funct ion crash kernel inside f_hidg_write */
++	/* usb_ep_dequeue(hidg->in_ep, hidg->req); */
++
+ 	kfree(hidg->req->buf);
+ 	usb_ep_free_request(hidg->in_ep, hidg->req);
+ 
+@@ -689,7 +779,7 @@ static struct usb_gadget_strings *ct_func_strings[] = {
+ /*-------------------------------------------------------------------------*/
+ /*                             usb_configuration                           */
+ 
+-int __init hidg_bind_config(struct usb_configuration *c,
++int hidg_bind_config(struct usb_configuration *c,
+ 			    struct hidg_func_descriptor *fdesc, int index)
+ {
+ 	struct f_hidg *hidg;
+@@ -743,7 +833,7 @@ int __init hidg_bind_config(struct usb_configuration *c,
+ 	return status;
+ }
+ 
+-int __init ghid_setup(struct usb_gadget *g, int count)
++int ghid_setup(struct usb_gadget *g, int count)
+ {
+ 	int status;
+ 	dev_t dev;
+diff --git a/drivers/usb/gadget/f_hid.h b/drivers/usb/gadget/f_hid.h
+new file mode 100644
+index 0000000..ad3527a
+--- /dev/null
++++ b/drivers/usb/gadget/f_hid.h
+@@ -0,0 +1,16 @@
++#ifndef _GADGET_F_HID_H
++#define _GADGET_F_HID_H
++
++#include <linux/hid.h>
++#include <linux/usb/composite.h>
++#include <linux/usb/gadget.h>
++#include <linux/usb/g_hid.h>
++
++int hidg_bind_config(struct usb_configuration *c,
++			    struct hidg_func_descriptor *fdesc, int index);
++
++int ghid_setup(struct usb_gadget *g, int count);
++
++void ghid_cleanup(void);
++
++#endif
+diff --git a/drivers/usb/gadget/f_hid_android_keyboard.c b/drivers/usb/gadget/f_hid_android_keyboard.c
+new file mode 100644
+index 0000000..1824bdd
+--- /dev/null
++++ b/drivers/usb/gadget/f_hid_android_keyboard.c
+@@ -0,0 +1,44 @@
++#include <linux/platform_device.h>
++#include <linux/usb/g_hid.h>
++
++/* hid descriptor for a keyboard */
++static struct hidg_func_descriptor ghid_device_android_keyboard = {
++	.subclass		= 1, /* Boot Interface Subclass */
++	.protocol		= 1, /* Keyboard */
++	.report_length		= 8,
++	.report_desc_length	= 63,
++	.report_desc		= {
++		0x05, 0x01,	/* USAGE_PAGE (Generic Desktop)	          */
++		0x09, 0x06,	/* USAGE (Keyboard)                       */
++		0xa1, 0x01,	/* COLLECTION (Application)               */
++		0x05, 0x07,	/*   USAGE_PAGE (Keyboard)                */
++		0x19, 0xe0,	/*   USAGE_MINIMUM (Keyboard LeftControl) */
++		0x29, 0xe7,	/*   USAGE_MAXIMUM (Keyboard Right GUI)   */
++		0x15, 0x00,	/*   LOGICAL_MINIMUM (0)                  */
++		0x25, 0x01,	/*   LOGICAL_MAXIMUM (1)                  */
++		0x75, 0x01,	/*   REPORT_SIZE (1)                      */
++		0x95, 0x08,	/*   REPORT_COUNT (8)                     */
++		0x81, 0x02,	/*   INPUT (Data,Var,Abs)                 */
++		0x95, 0x01,	/*   REPORT_COUNT (1)                     */
++		0x75, 0x08,	/*   REPORT_SIZE (8)                      */
++		0x81, 0x03,	/*   INPUT (Cnst,Var,Abs)                 */
++		0x95, 0x05,	/*   REPORT_COUNT (5)                     */
++		0x75, 0x01,	/*   REPORT_SIZE (1)                      */
++		0x05, 0x08,	/*   USAGE_PAGE (LEDs)                    */
++		0x19, 0x01,	/*   USAGE_MINIMUM (Num Lock)             */
++		0x29, 0x05,	/*   USAGE_MAXIMUM (Kana)                 */
++		0x91, 0x02,	/*   OUTPUT (Data,Var,Abs)                */
++		0x95, 0x01,	/*   REPORT_COUNT (1)                     */
++		0x75, 0x03,	/*   REPORT_SIZE (3)                      */
++		0x91, 0x03,	/*   OUTPUT (Cnst,Var,Abs)                */
++		0x95, 0x06,	/*   REPORT_COUNT (6)                     */
++		0x75, 0x08,	/*   REPORT_SIZE (8)                      */
++		0x15, 0x00,	/*   LOGICAL_MINIMUM (0)                  */
++		0x25, 0x65,	/*   LOGICAL_MAXIMUM (101)                */
++		0x05, 0x07,	/*   USAGE_PAGE (Keyboard)                */
++		0x19, 0x00,	/*   USAGE_MINIMUM (Reserved)             */
++		0x29, 0x65,	/*   USAGE_MAXIMUM (Keyboard Application) */
++		0x81, 0x00,	/*   INPUT (Data,Ary,Abs)                 */
++		0xc0		/* END_COLLECTION                         */
++	}
++};
+diff --git a/drivers/usb/gadget/f_hid_android_mouse.c b/drivers/usb/gadget/f_hid_android_mouse.c
+new file mode 100644
+index 0000000..075d125
+--- /dev/null
++++ b/drivers/usb/gadget/f_hid_android_mouse.c
+@@ -0,0 +1,40 @@
++#include <linux/platform_device.h>
++#include <linux/usb/g_hid.h>
++
++/* HID descriptor for a mouse */
++static struct hidg_func_descriptor ghid_device_android_mouse = {
++	.subclass      = 1, /* Boot Interface Subclass */
++	.protocol      = 2, /* Mouse */
++	.report_length = 4,
++	.report_desc_length	= 52,
++	.report_desc = {
++		0x05, 0x01,  //Usage Page(Generic Desktop Controls)
++		0x09, 0x02,  //Usage (Mouse)
++		0xa1, 0x01,  //Collection (Application)
++		0x09, 0x01,  //Usage (pointer)
++		0xa1, 0x00,  //Collection (Physical)
++		0x05, 0x09,  //Usage Page (Button)
++		0x19, 0x01,  //Usage Minimum(1)
++		0x29, 0x05,  //Usage Maximum(5)
++		0x15, 0x00,  //Logical Minimum(1)
++		0x25, 0x01,  //Logical Maximum(1)
++		0x95, 0x05,  //Report Count(5)
++		0x75, 0x01,  //Report Size(1)
++		0x81, 0x02,  //Input(Data,Variable,Absolute,BitField)
++		0x95, 0x01,  //Report Count(1)
++		0x75, 0x03,  //Report Size(3)
++		0x81, 0x01,  //Input(Constant,Array,Absolute,BitField)
++		0x05, 0x01,  //Usage Page(Generic Desktop Controls)
++		0x09, 0x30,  //Usage(x)
++		0x09, 0x31,  //Usage(y)
++		0x09, 0x38,  //Usage(Wheel)
++		0x15, 0x81,  //Logical Minimum(-127)
++		0x25, 0x7F,  //Logical Maximum(127)
++		0x75, 0x08,  //Report Size(8)
++		0x95, 0x03,  //Report Count(3)
++		0x81, 0x06,  //Input(Data,Variable,Relative,BitField)
++		0xc0,  //End Collection
++		0xc0  //End Collection
++	}
++};
++
+-- 
+2.7.4
+
+
+From 0a7a5faf79e671724e29faa28a263a1120ff20bb Mon Sep 17 00:00:00 2001
+From: ben <joeisgood99@gmail.com>
+Date: Mon, 12 Dec 2016 20:47:17 +1100
+Subject: [PATCH 2/3] Fix Kali-config so all modules build
+
+---
+ arch/arm64/configs/msm8994-KaliV2-perf_defconfig | 661 +++++++++++++++++++++++
+ 1 file changed, 661 insertions(+)
+ create mode 100644 arch/arm64/configs/msm8994-KaliV2-perf_defconfig
+
+diff --git a/arch/arm64/configs/msm8994-KaliV2-perf_defconfig b/arch/arm64/configs/msm8994-KaliV2-perf_defconfig
+new file mode 100644
+index 0000000..3c711ce
+--- /dev/null
++++ b/arch/arm64/configs/msm8994-KaliV2-perf_defconfig
+@@ -0,0 +1,661 @@
++CONFIG_LOCALVERSION="-perf"
++CONFIG_ZRAM=y
++CONFIG_ZSMALLOC=y
++CONFIG_SYSVIPC=y
++CONFIG_NO_HZ=y
++CONFIG_HIGH_RES_TIMERS=y
++CONFIG_IRQ_TIME_ACCOUNTING=y
++CONFIG_AUDIT=y
++CONFIG_RCU_FAST_NO_HZ=y
++CONFIG_IKCONFIG=y
++CONFIG_IKCONFIG_PROC=y
++CONFIG_CGROUPS=y
++CONFIG_CGROUP_FREEZER=y
++CONFIG_CGROUP_CPUACCT=y
++CONFIG_RESOURCE_COUNTERS=y
++CONFIG_CGROUP_SCHED=y
++CONFIG_RT_GROUP_SCHED=y
++CONFIG_SCHED_HMP=y
++CONFIG_CFS_BANDWIDTH=y
++CONFIG_NAMESPACES=y
++# CONFIG_UTS_NS is not set
++# CONFIG_IPC_NS is not set
++# CONFIG_PID_NS is not set
++# CONFIG_LEGACY_PTYS is not set
++# CONFIG_INPUT_MOUSE is not set
++CONFIG_RELAY=y
++CONFIG_BLK_DEV_INITRD=y
++CONFIG_RD_BZIP2=y
++CONFIG_RD_LZMA=y
++CONFIG_CC_OPTIMIZE_FOR_SIZE=y
++CONFIG_PANIC_TIMEOUT=5
++CONFIG_KALLSYMS_ALL=y
++CONFIG_EMBEDDED=y
++# CONFIG_SLUB_DEBUG is not set
++CONFIG_PROFILING=y
++CONFIG_CC_STACKPROTECTOR_REGULAR=y
++CONFIG_MODULES=y
++CONFIG_MODULE_UNLOAD=y
++CONFIG_MODULE_FORCE_UNLOAD=y
++CONFIG_MODVERSIONS=y
++CONFIG_PARTITION_ADVANCED=y
++CONFIG_ARCH_MSM=y
++CONFIG_ARCH_MSM8994=y
++CONFIG_ARCH_MSM8994_V1_TLBI_WA=y
++CONFIG_ARCH_MSM8992=y
++CONFIG_PCI_MSM=y
++CONFIG_ARM64_A57_ERRATA_832075=y
++CONFIG_SMP=y
++CONFIG_SCHED_MC=y
++CONFIG_PREEMPT=y
++CONFIG_ARMV7_COMPAT=y
++CONFIG_SECCOMP=y
++CONFIG_BUILD_ARM64_APPENDED_DTB_IMAGE=y
++# CONFIG_CORE_DUMP_DEFAULT_ELF_HEADERS is not set
++CONFIG_COMPAT=y
++CONFIG_PM_AUTOSLEEP=y
++CONFIG_PM_WAKELOCKS=y
++CONFIG_PM_WAKELOCKS_LIMIT=0
++# CONFIG_PM_WAKELOCKS_GC is not set
++CONFIG_PM_RUNTIME=y
++CONFIG_PM_OPP=y
++CONFIG_SUSPEND_TIME=y
++CONFIG_CPU_FREQ=y
++CONFIG_SCHED_FREQ_INPUT=y
++CONFIG_CPU_FREQ_GOV_POWERSAVE=y
++CONFIG_CPU_FREQ_GOV_USERSPACE=y
++CONFIG_CPU_FREQ_GOV_ONDEMAND=y
++CONFIG_CPU_FREQ_GOV_INTERACTIVE=y
++CONFIG_CPU_BOOST=y
++CONFIG_CPU_IDLE=y
++CONFIG_CPU_IDLE_MULTIPLE_DRIVERS=y
++CONFIG_NET=y
++CONFIG_PACKET=y
++CONFIG_UNIX=y
++CONFIG_XFRM_USER=y
++CONFIG_XFRM_STATISTICS=y
++CONFIG_NET_KEY=y
++CONFIG_INET=y
++CONFIG_IP_ADVANCED_ROUTER=y
++CONFIG_IP_MULTIPLE_TABLES=y
++CONFIG_IP_ROUTE_VERBOSE=y
++CONFIG_IP_PNP=y
++CONFIG_IP_PNP_DHCP=y
++CONFIG_INET_AH=y
++CONFIG_INET_ESP=y
++CONFIG_INET_XFRM_TUNNEL=y
++CONFIG_INET_XFRM_MODE_TRANSPORT=y
++CONFIG_INET_XFRM_MODE_TUNNEL=y
++CONFIG_INET_IPCOMP=y
++# CONFIG_INET_XFRM_MODE_BEET is not set
++# CONFIG_INET_LRO is not set
++CONFIG_IPV6=y
++CONFIG_IPV6_PRIVACY=y
++CONFIG_IPV6_ROUTER_PREF=y
++CONFIG_IPV6_ROUTE_INFO=y
++CONFIG_IPV6_OPTIMISTIC_DAD=y
++CONFIG_INET6_AH=y
++CONFIG_INET6_ESP=y
++CONFIG_INET6_IPCOMP=y
++CONFIG_IPV6_MIP6=y
++CONFIG_IPV6_MULTIPLE_TABLES=y
++CONFIG_IPV6_SUBTREES=y
++CONFIG_NETFILTER=y
++CONFIG_NF_CONNTRACK=y
++CONFIG_NF_CONNTRACK_EVENTS=y
++CONFIG_NF_CT_PROTO_DCCP=y
++CONFIG_NF_CT_PROTO_SCTP=y
++CONFIG_NF_CT_PROTO_UDPLITE=y
++CONFIG_NF_CONNTRACK_AMANDA=y
++CONFIG_NF_CONNTRACK_FTP=y
++CONFIG_NF_CONNTRACK_H323=y
++CONFIG_NF_CONNTRACK_IRC=y
++CONFIG_NF_CONNTRACK_NETBIOS_NS=y
++CONFIG_NF_CONNTRACK_PPTP=y
++CONFIG_NF_CONNTRACK_SANE=y
++CONFIG_NF_CONNTRACK_TFTP=y
++CONFIG_NF_CT_NETLINK=y
++CONFIG_NETFILTER_TPROXY=y
++CONFIG_NETFILTER_XT_TARGET_CLASSIFY=y
++CONFIG_NETFILTER_XT_TARGET_CONNMARK=y
++CONFIG_NETFILTER_XT_TARGET_IDLETIMER=y
++CONFIG_NETFILTER_XT_TARGET_HARDIDLETIMER=y
++CONFIG_NETFILTER_XT_TARGET_MARK=y
++CONFIG_NETFILTER_XT_TARGET_LOG=y
++CONFIG_NETFILTER_XT_TARGET_NFLOG=y
++CONFIG_NETFILTER_XT_TARGET_NFQUEUE=y
++CONFIG_NETFILTER_XT_TARGET_NOTRACK=y
++CONFIG_NETFILTER_XT_TARGET_TEE=y
++CONFIG_NETFILTER_XT_TARGET_TPROXY=y
++CONFIG_NETFILTER_XT_TARGET_TRACE=y
++CONFIG_NETFILTER_XT_TARGET_TCPMSS=y
++CONFIG_NETFILTER_XT_TARGET_NOTRACK=y
++CONFIG_NETFILTER_XT_TARGET_LOG=y
++CONFIG_NETFILTER_XT_MATCH_COMMENT=y
++CONFIG_NETFILTER_XT_MATCH_CONNLIMIT=y
++CONFIG_NETFILTER_XT_MATCH_CONNMARK=y
++CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
++CONFIG_NETFILTER_XT_MATCH_ESP=y
++CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
++CONFIG_NETFILTER_XT_MATCH_HELPER=y
++CONFIG_NETFILTER_XT_MATCH_IPRANGE=y
++CONFIG_NETFILTER_XT_MATCH_LENGTH=y
++CONFIG_NETFILTER_XT_MATCH_LIMIT=y
++CONFIG_NETFILTER_XT_MATCH_MAC=y
++CONFIG_NETFILTER_XT_MATCH_MARK=y
++CONFIG_NETFILTER_XT_MATCH_MULTIPORT=y
++CONFIG_NETFILTER_XT_MATCH_POLICY=y
++CONFIG_NETFILTER_XT_MATCH_PKTTYPE=y
++CONFIG_NETFILTER_XT_MATCH_QTAGUID=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA2=y
++CONFIG_NETFILTER_XT_MATCH_QUOTA2_LOG=y
++CONFIG_NETFILTER_XT_MATCH_SOCKET=y
++CONFIG_NETFILTER_XT_MATCH_STATE=y
++CONFIG_NETFILTER_XT_MATCH_STATISTIC=y
++CONFIG_NETFILTER_XT_MATCH_STRING=y
++CONFIG_NETFILTER_XT_MATCH_TIME=y
++CONFIG_NETFILTER_XT_MATCH_U32=y
++CONFIG_NF_CONNTRACK_IPV4=y
++CONFIG_IP_NF_IPTABLES=y
++CONFIG_IP_NF_MATCH_AH=y
++CONFIG_IP_NF_MATCH_ECN=y
++CONFIG_IP_NF_MATCH_TTL=y
++CONFIG_IP_NF_FILTER=y
++CONFIG_IP_NF_TARGET_REJECT=y
++CONFIG_IP_NF_TARGET_REJECT_SKERR=y
++CONFIG_NF_NAT_IPV4=y
++CONFIG_IP_NF_TARGET_MASQUERADE=y
++CONFIG_IP_NF_TARGET_NETMAP=y
++CONFIG_IP_NF_TARGET_REDIRECT=y
++CONFIG_IP_NF_MANGLE=y
++CONFIG_IP_NF_RAW=y
++CONFIG_IP_NF_ARPTABLES=y
++CONFIG_IP_NF_ARPFILTER=y
++CONFIG_IP_NF_ARP_MANGLE=y
++CONFIG_NF_CONNTRACK_IPV6=y
++CONFIG_IP6_NF_IPTABLES=y
++CONFIG_IP6_NF_FILTER=y
++CONFIG_IP6_NF_TARGET_REJECT=y
++CONFIG_IP6_NF_TARGET_REJECT_SKERR=y
++CONFIG_IP6_NF_MANGLE=y
++CONFIG_IP6_NF_RAW=y
++CONFIG_BRIDGE_NF_EBTABLES=y
++CONFIG_BRIDGE_EBT_BROUTE=y
++CONFIG_BRIDGE=y
++CONFIG_NET_SCHED=y
++CONFIG_NET_SCH_HTB=y
++CONFIG_NET_SCH_PRIO=y
++CONFIG_NET_CLS_FW=y
++CONFIG_NET_CLS_U32=y
++CONFIG_CLS_U32_MARK=y
++CONFIG_NET_CLS_FLOW=y
++CONFIG_NET_EMATCH=y
++CONFIG_NET_EMATCH_U32=y
++CONFIG_NET_CLS_ACT=y
++CONFIG_RMNET_DATA=y
++CONFIG_RMNET_DATA_FC=y
++CONFIG_RMNET_DATA_DEBUG_PKT=y
++CONFIG_BT=y
++CONFIG_BT_RFCOMM=y
++CONFIG_BT_RFCOMM_TTY=y
++CONFIG_BT_BNEP=y
++CONFIG_BT_BNEP_MC_FILTER=y
++CONFIG_BT_BNEP_PROTO_FILTER=y
++CONFIG_BT_HIDP=y
++CONFIG_MSM_BT_POWER=y
++CONFIG_CFG80211=y
++CONFIG_CFG80211_INTERNAL_REGDB=y
++CONFIG_RFKILL=y
++CONFIG_NFC_QNCI=y
++# CONFIG_NFC_NQ is not set
++CONFIG_IPC_ROUTER=y
++CONFIG_IPC_ROUTER_SECURITY=y
++CONFIG_CMA=y
++CONFIG_ARM_CCI=y
++CONFIG_BLK_DEV_LOOP=y
++CONFIG_BLK_DEV_RAM=y
++CONFIG_QSEECOM=y
++CONFIG_TI_DRV2667=y
++CONFIG_QCOM_LIQUID_DOCK=y
++CONFIG_SCSI=y
++CONFIG_SCSI_TGT=y
++CONFIG_BLK_DEV_SD=y
++CONFIG_CHR_DEV_SG=y
++CONFIG_CHR_DEV_SCH=y
++CONFIG_SCSI_MULTI_LUN=y
++CONFIG_SCSI_CONSTANTS=y
++CONFIG_SCSI_LOGGING=y
++CONFIG_SCSI_SCAN_ASYNC=y
++CONFIG_SCSI_UFSHCD=y
++CONFIG_SCSI_UFSHCD_PLATFORM=y
++CONFIG_SCSI_UFS_QCOM=y
++CONFIG_SCSI_UFS_TEST=m
++CONFIG_SCSI_UFS_QCOM_ICE=y
++CONFIG_MD=y
++CONFIG_BLK_DEV_DM=y
++CONFIG_DM_CRYPT=y
++CONFIG_DM_REQ_CRYPT=y
++CONFIG_DM_VERITY=y
++CONFIG_NETDEVICES=y
++CONFIG_DUMMY=y
++CONFIG_TUN=y
++CONFIG_RNDIS_IPA=y
++CONFIG_PPP=y
++CONFIG_PPP_BSDCOMP=y
++CONFIG_PPP_DEFLATE=y
++CONFIG_PPP_MPPE=y
++CONFIG_PPPOE=y
++CONFIG_PPPOLAC=y
++CONFIG_PPPOPNS=y
++CONFIG_PPP_ASYNC=y
++CONFIG_PPP_SYNC_TTY=y
++CONFIG_USB_USBNET=y
++CONFIG_CNSS=y
++CONFIG_BUS_AUTO_SUSPEND=y
++CONFIG_WCNSS_MEM_PRE_ALLOC=y
++CONFIG_CNSS_MAC_BUG=y
++CONFIG_CLD_LL_CORE=y
++CONFIG_ATH_CARDS=y
++CONFIG_WIL6210=m
++CONFIG_E1000E=y
++CONFIG_INPUT_EVDEV=y
++CONFIG_INPUT_EVBUG=m
++CONFIG_KEYBOARD_GPIO=y
++CONFIG_INPUT_TOUCHSCREEN=y
++CONFIG_SECURE_TOUCH=y
++CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_CORE_v21=y
++CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_RMI_DEV_v21=y
++CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_FW_UPDATE_v21=y
++CONFIG_TOUCHSCREEN_ATMEL_MAXTOUCH_TS=y
++CONFIG_TOUCHSCREEN_GEN_VKEYS=y
++CONFIG_INPUT_MISC=y
++CONFIG_INPUT_UINPUT=y
++CONFIG_INPUT_GPIO=m
++# CONFIG_SERIO_I8042 is not set
++# CONFIG_VT is not set
++# CONFIG_LEGACY_PTYS is not set
++# CONFIG_DEVMEM is not set
++# CONFIG_DEVKMEM is not set
++CONFIG_SERIAL_MSM_HS=y
++CONFIG_SERIAL_MSM_SMD=y
++CONFIG_DIAG_CHAR=y
++CONFIG_HW_RANDOM=y
++CONFIG_HW_RANDOM_MSM=y
++CONFIG_MSM_SMD_PKT=y
++CONFIG_MSM_ADSPRPC=y
++CONFIG_I2C=y
++CONFIG_I2C_CHARDEV=y
++CONFIG_I2C_MSM_V2=y
++CONFIG_SLIMBUS_MSM_NGD=y
++CONFIG_DMADEVICES=y
++CONFIG_HAS_DMA=y
++CONFIG_QCOM_SPS_DMA=y
++CONFIG_SPI=y
++CONFIG_SPI_QUP=y
++CONFIG_SPI_SPIDEV=m
++CONFIG_SPMI=y
++CONFIG_SPMI_MSM_PMIC_ARB=y
++CONFIG_MSM_QPNP_INT=y
++CONFIG_USE_PINCTRL_IRQ=y
++CONFIG_PINCTRL_MSM_TLMM=y
++CONFIG_GPIO_SYSFS=y
++CONFIG_GPIO_QPNP_PIN=y
++CONFIG_SMB135X_CHARGER=y
++CONFIG_SMB349_DUAL_CHARGER=y
++CONFIG_QPNP_SMBCHARGER=y
++CONFIG_QPNP_FG=y
++CONFIG_BATTERY_BCL=y
++CONFIG_MSM_BCL_CTL=y
++CONFIG_MSM_BCL_PERIPHERAL_CTL=y
++CONFIG_POWER_RESET_MSM=y
++CONFIG_MSM_DLOAD_MODE=y
++CONFIG_MSM_PM=y
++CONFIG_APSS_CORE_EA=y
++CONFIG_SENSORS_QPNP_ADC_VOLTAGE=y
++CONFIG_THERMAL=y
++CONFIG_THERMAL_TSENS8974=y
++CONFIG_THERMAL_MONITOR=y
++CONFIG_THERMAL_QPNP=y
++CONFIG_THERMAL_QPNP_ADC_TM=y
++CONFIG_LIMITS_MONITOR=y
++CONFIG_LIMITS_LITE_HW=y
++CONFIG_WCD9330_CODEC=y
++CONFIG_REGULATOR=y
++CONFIG_REGULATOR_FIXED_VOLTAGE=y
++CONFIG_REGULATOR_PROXY_CONSUMER=y
++CONFIG_REGULATOR_MEM_ACC=y
++CONFIG_REGULATOR_TPS65132=y
++CONFIG_REGULATOR_STUB=y
++CONFIG_REGULATOR_RPM_SMD=y
++CONFIG_REGULATOR_QPNP=y
++CONFIG_REGULATOR_QPNP_LABIBB=y
++CONFIG_REGULATOR_SPM=y
++CONFIG_REGULATOR_CPR=y
++CONFIG_MEDIA_SUPPORT=y
++CONFIG_MEDIA_CAMERA_SUPPORT=y
++CONFIG_MEDIA_DIGITAL_TV_SUPPORT=y
++CONFIG_MEDIA_RADIO_SUPPORT=y
++CONFIG_MEDIA_CONTROLLER=y
++CONFIG_VIDEO_V4L2_SUBDEV_API=y
++CONFIG_VIDEOBUF2_MSM_MEM=y
++CONFIG_MEDIA_USB_SUPPORT=y
++CONFIG_USB_VIDEO_CLASS=y
++CONFIG_V4L_PLATFORM_DRIVERS=y
++CONFIG_MSMB_CAMERA=y
++CONFIG_MSM_CAMERA_SENSOR=y
++CONFIG_MSM_CPP=y
++CONFIG_MSM_CCI=y
++CONFIG_MSM_CSI30_HEADER=y
++CONFIG_MSM_CSIPHY=y
++CONFIG_MSM_CSID=y
++CONFIG_MSM_EEPROM=y
++CONFIG_MSM_ISPIF=y
++CONFIG_HI256=y
++CONFIG_MT9M114=y
++CONFIG_MSM_V4L2_VIDEO_OVERLAY_DEVICE=y
++CONFIG_MSMB_JPEG=y
++CONFIG_MSM_FD=y
++CONFIG_MSM_VIDC_V4L2=y
++CONFIG_DVB_MPQ=m
++CONFIG_DVB_MPQ_DEMUX=m
++CONFIG_TSPP=m
++CONFIG_RADIO_SILABS=y
++CONFIG_MSM_KGSL=y
++CONFIG_KGSL_PER_PROCESS_PAGE_TABLE=y
++CONFIG_FB=y
++CONFIG_FB_MSM=y
++CONFIG_FB_MSM_MDSS=y
++CONFIG_FB_MSM_MDSS_WRITEBACK=y
++CONFIG_FB_MSM_MDSS_HDMI_PANEL=y
++CONFIG_FB_MSM_MDSS_MHL3=y
++CONFIG_SOUND=y
++CONFIG_SND=y
++CONFIG_SND_USB_AUDIO=y
++CONFIG_SND_SOC=y
++CONFIG_SND_SOC_MSM8994=y
++CONFIG_UHID=y
++CONFIG_HID_APPLE=y
++CONFIG_HID_ELECOM=y
++CONFIG_HID_MAGICMOUSE=y
++CONFIG_HID_MICROSOFT=y
++CONFIG_HID_MULTITOUCH=y
++CONFIG_USB=y
++CONFIG_USB_ANNOUNCE_NEW_DEVICES=y
++CONFIG_USB_MON=y
++CONFIG_USB_XHCI_HCD=y
++CONFIG_USB_EHCI_HCD=y
++CONFIG_USB_EHCI_EHSET=y
++CONFIG_USB_EHCI_MSM=y
++CONFIG_USB_ACM=y
++CONFIG_USB_CCID_BRIDGE=y
++CONFIG_USB_STORAGE=y
++CONFIG_USB_STORAGE_DATAFAB=y
++CONFIG_USB_STORAGE_FREECOM=y
++CONFIG_USB_STORAGE_ISD200=y
++CONFIG_USB_STORAGE_USBAT=y
++CONFIG_USB_STORAGE_SDDR09=y
++CONFIG_USB_STORAGE_SDDR55=y
++CONFIG_USB_STORAGE_JUMPSHOT=y
++CONFIG_USB_STORAGE_ALAUDA=y
++CONFIG_USB_STORAGE_KARMA=y
++CONFIG_USB_STORAGE_CYPRESS_ATACB=y
++CONFIG_USB_SERIAL=y
++CONFIG_USB_SERIAL_CSVT=y
++CONFIG_USB_EHSET_TEST_FIXTURE=y
++CONFIG_USB_PHY=y
++CONFIG_USB_MSM_SSPHY_QMP=y
++CONFIG_MSM_QUSB_PHY=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_GADGET_DEBUG_FILES=y
++CONFIG_USB_GADGET_DEBUG_FS=y
++CONFIG_USB_CI13XXX_MSM=y
++CONFIG_USB_DWC3_MSM=y
++CONFIG_USB_G_ANDROID=y
++CONFIG_MMC=y
++CONFIG_MMC_PERF_PROFILING=y
++CONFIG_MMC_UNSAFE_RESUME=y
++CONFIG_MMC_CLKGATE=y
++CONFIG_MMC_PARANOID_SD_INIT=y
++CONFIG_MMC_BLOCK_MINORS=32
++CONFIG_MMC_TEST=m
++CONFIG_MMC_BLOCK_TEST=m
++CONFIG_MMC_SDHCI=y
++CONFIG_MMC_SDHCI_PLTFM=y
++CONFIG_MMC_SDHCI_MSM=y
++CONFIG_LEDS_QPNP=y
++CONFIG_LEDS_QPNP_FLASH=y
++CONFIG_LEDS_QPNP_WLED=y
++CONFIG_LEDS_TRIGGERS=y
++CONFIG_LEDS_TRIGGER_BACKLIGHT=y
++CONFIG_LEDS_TRIGGER_DEFAULT_ON=y
++CONFIG_SWITCH=y
++CONFIG_RTC_CLASS=y
++CONFIG_RTC_DRV_QPNP=y
++CONFIG_UIO=y
++CONFIG_UIO_MSM_SHAREDMEM=y
++CONFIG_STAGING=y
++CONFIG_ANDROID=y
++CONFIG_ANDROID_BINDER_IPC=y
++CONFIG_ASHMEM=y
++CONFIG_ANDROID_LOGGER=y
++CONFIG_ANDROID_LOW_MEMORY_KILLER=y
++CONFIG_ANDROID_INTF_ALARM_DEV=y
++CONFIG_ONESHOT_SYNC=y
++CONFIG_ION=y
++CONFIG_ION_MSM=y
++CONFIG_SPS=y
++CONFIG_USB_BAM=y
++CONFIG_SPS_SUPPORT_NDP_BAM=y
++CONFIG_QPNP_POWER_ON=y
++CONFIG_QPNP_REVID=y
++CONFIG_QPNP_COINCELL=y
++CONFIG_QPNP_USB_DETECT=y
++CONFIG_IPA=y
++CONFIG_RMNET_IPA=y
++CONFIG_MSM_AVTIMER=y
++CONFIG_PFT=y
++CONFIG_MSM_BUS_SCALING=y
++CONFIG_BUS_TOPOLOGY_ADHOC=y
++CONFIG_DEBUG_BUS_VOTER=y
++CONFIG_QPNP_HAPTIC=y
++CONFIG_SEEMP_CORE=y
++CONFIG_MSM_MDSS_PLL=y
++CONFIG_REMOTE_SPINLOCK_MSM=y
++CONFIG_MSM_IOMMU_VBIF_CHECK=y
++CONFIG_MSM_IOMMU_V1=y
++CONFIG_PWM=y
++CONFIG_PWM_QPNP=y
++CONFIG_CORESIGHT=y
++CONFIG_CORESIGHT_EVENT=y
++CONFIG_CORESIGHT_FUSE=y
++CONFIG_CORESIGHT_CTI=y
++CONFIG_CORESIGHT_CTI_SAVE_DISABLE=y
++CONFIG_CORESIGHT_TMC=y
++CONFIG_CORESIGHT_TPIU=y
++CONFIG_CORESIGHT_FUNNEL=y
++CONFIG_CORESIGHT_REPLICATOR=y
++CONFIG_CORESIGHT_TPDA=y
++CONFIG_CORESIGHT_TPDM=y
++CONFIG_CORESIGHT_STM=y
++CONFIG_CORESIGHT_HWEVENT=y
++CONFIG_SENSORS_SSC=y
++CONFIG_GENERIC_PHY=y
++CONFIG_MSM_EVENT_TIMER=y
++CONFIG_MSM_IPC_ROUTER_SMD_XPRT=y
++CONFIG_MSM_QMI_INTERFACE=y
++CONFIG_MSM_SMD=y
++CONFIG_MSM_SMD_DEBUG=y
++CONFIG_MSM_RPM_SMD=y
++CONFIG_MSM_RPM_RBCPR_STATS_V2_LOG=y
++CONFIG_MSM_RPM_LOG=y
++CONFIG_MSM_RPM_STATS_LOG=y
++CONFIG_MSM_RUN_QUEUE_STATS=y
++CONFIG_MSM_SMEM=y
++CONFIG_MSM_SMEM_LOGGING=y
++CONFIG_MSM_SMP2P=y
++CONFIG_MSM_SMP2P_TEST=y
++CONFIG_MSM_SPM=y
++CONFIG_MSM_L2_SPM=y
++CONFIG_MSM_ADSP_LOADER=y
++CONFIG_MSM_MEMORY_DUMP_V2=y
++CONFIG_MSM_WATCHDOG_V2=y
++CONFIG_MSM_HVC=y
++CONFIG_MSM_SUBSYSTEM_RESTART=y
++CONFIG_MSM_SYSMON_COMM=y
++CONFIG_MSM_PIL=y
++CONFIG_MSM_PIL_SSR_GENERIC=y
++CONFIG_MSM_PIL_MSS_QDSP6V5=y
++CONFIG_MSM_OCMEM=y
++CONFIG_MSM_OCMEM_LOCAL_POWER_CTRL=y
++CONFIG_MSM_BOOT_STATS=y
++CONFIG_MSM_SCM=y
++CONFIG_MSM_SHARED_HEAP_ACCESS=y
++CONFIG_MSM_SYSTEM_HEALTH_MONITOR=y
++CONFIG_QCOM_EARLY_RANDOM=y
++CONFIG_EXT2_FS=y
++CONFIG_EXT2_FS_XATTR=y
++CONFIG_EXT3_FS=y
++# CONFIG_EXT3_DEFAULTS_TO_ORDERED is not set
++CONFIG_EXT4_FS=y
++CONFIG_EXT4_FS_SECURITY=y
++CONFIG_FUSE_FS=y
++CONFIG_VFAT_FS=y
++CONFIG_TMPFS=y
++CONFIG_NLS_CODEPAGE_437=y
++CONFIG_NLS_ASCII=y
++CONFIG_NLS_ISO8859_1=y
++CONFIG_PRINTK_TIME=y
++CONFIG_MAGIC_SYSRQ=y
++CONFIG_PANIC_ON_RECURSIVE_FAULT=y
++CONFIG_SCHEDSTATS=y
++CONFIG_TIMER_STATS=y
++# CONFIG_DEBUG_PREEMPT is not set
++# CONFIG_DEBUG_BUGVERBOSE is not set
++CONFIG_DEBUG_INFO=y
++CONFIG_IPC_LOGGING=y
++CONFIG_CPU_FREQ_SWITCH_PROFILER=y
++CONFIG_OOPS_LOG_BUFFER=y
++CONFIG_LOG_BUF_MAGIC=y
++CONFIG_OOPS_LOG_BUF_SHIFT=14
++CONFIG_KEYS=y
++CONFIG_SECURITY=y
++CONFIG_SECURITY_PFT=y
++CONFIG_SECURITY_NETWORK=y
++CONFIG_LSM_MMAP_MIN_ADDR=4096
++CONFIG_SECURITY_SELINUX=y
++CONFIG_CRYPTO=y
++CONFIG_CRYPTO_NULL=y
++CONFIG_CRYPTO_XCBC=y
++CONFIG_CRYPTO_CTR=y
++CONFIG_CRYPTO_MD4=y
++CONFIG_CRYPTO_TWOFISH=y
++CONFIG_CRYPTO_DEV_QCRYPTO=y
++CONFIG_CRYPTO_DEV_QCE=y
++CONFIG_CRYPTO_DEV_QCEDEV=y
++CONFIG_CRYPTO_DEV_QCOM_ICE=y
++CONFIG_SOCKEV_NLMCAST=y
++CONFIG_ARM64_CRYPTO=y
++CONFIG_CRYPTO_SHA1_ARM64_CE=y
++CONFIG_CRYPTO_SHA2_ARM64_CE=y
++CONFIG_CRYPTO_GHASH_ARM64_CE=y
++CONFIG_CRYPTO_AES_ARM64_CE=y
++CONFIG_CRYPTO_AES_ARM64_CE_CCM=y
++CONFIG_CRYPTO_AES_ARM64_CE_BLK=y
++CONFIG_CRYPTO_AES_ARM64_NEON_BLK=y
++CONFIG_QMI_ENCDEC=y
++CONFIG_MOBICORE_SUPPORT=m
++CONFIG_MOBICORE_API=m
++CONFIG_STRICT_MEMORY_RWX=y
++CONFIG_DEVFREQ_SPDM=y
++CONFIG_MSM_PERFORMANCE=y
++CONFIG_CONSOLE_FLUSH_ON_HOTPLUG=y
++CONFIG_INPUT_JOYSTICK=y
++CONFIG_JOYSTICK_XPAD=y
++CONFIG_QCOM_NPA_DUMP=y
++CONFIG_KERNEL_TEXT_MPU_PROT=y
++CONFIG_MSM_CORE_CTL_HELPER=y
++CONFIG_UID_CPUTIME=y
++#
++#-KALI-CONFIGS-#
++CONFIG_MODULE_FORCE_LOAD=y
++CONFIG_MODVERSIONS=y
++#
++CONFIG_USB_GSPCA=m
++CONFIG_MAC80211=m
++CONFIF_CRYPTO_ARC4=y
++CONFIG_CRYPTO_AES=y
++CONFIG_CRC32=y
++CONFIG_AVERAGE=y
++#CONFIG_MAC80211_HAS_RC=y
++#
++#Blue Tooth
++CONFIG_BT_HCIBTUSB=y
++CONFIG_BT_HCIUART=y
++CONFIG_BT_HCIBCM203X=m
++CONFIG_BT_HCIBPA10X=m
++CONFIG_BT_HCIBFUSB=m
++#
++#USB Drivers/Network adaptors
++#
++CONFIG_NET_CORE=y
++CONFIG_CONFIG_MII=y
++CONFIG_PHYLIB=y
++CONFIG_USB_RTL8150=y
++CONFIG_USB_NET_AX8817X=y
++CONFIG_USB_NET_AX88179_178A=y
++CONFIG_USB_NET_CDCETHER=y
++CONFIG_USB_NET_NET1080=y
++CONFIG_USB_NET_RNDIS_HOST=y
++CONFIG_USB_NET_CDC_SUBSET
++CONFIG_USB_BELKIN=y
++CONFIG_USB_ARMLINUX=y
++CONFIG_USB_NET_ZAURUS=y
++CONFIG_ATMEL=m
++CONFIG_USB_ZD1201=m
++CONFIG_USB_NET_RNDIS_WLAN=y
++CONFIG_RTL8187=y
++CONFIG_WIFI_CONTROL_FUNC=y
++#
++CONFIG_RT2X00=y
++CONFIG_RTLWIFI=y
++CONFIG_CARL9170=m
++CONFIG_CARL9170_LEDS=y
++CONFIG_ATH6KL=y
++CONFIG_ATH6KL_USB=y
++CONFIG_WIL6210_ISR_COR=y
++CONFIG_WIL6210_TRACING=y
++CONFIG_RT2500USB=y
++CONFIG_RT73USB=y
++CONFIG_RT2800USB=y
++CONFIG_RT2800USB_RT33XX=y
++CONFIG_RT2800USB_RT35XX=y
++CONFIG_RT2800USB_RT53XX=y
++CONFIG_RT2800USB_RT55XX=y
++CONFIG_RT2800USB_UNKNOWN=y
++CONFIG_RT2800_LIB=y
++CONFIG_RT2X00_LIB_USB=y
++CONFIG_RT2X00_LIB=y
++CONFIG_RT2X00_LIB_FIRMWARE=y
++CONFIG_RT2X00_LIB_CRYPTO=y
++CONFIG_RT2X00_LIB_LEDS=y
++CONFIG_ATH_COMMON=m
++CONFIG_CARL9170_WPC=y
++CONFIG_RTLWIFI_DEBUG=y
++CONFIG_RTL8192CU=y
++CONFIG_ATH_CARDS=y
++CONFIG_ATH9K_BTCOEX_SUPPORT=y
++CONFIG_ATH9K_HTC=y
++CONFIG_RTL8192CE=m
++CONFIG_RTL8192C_COMMON=m
++# Userland interfaces
++#
++CONFIG_INPUT_MOUSEDEV=y
++CONFIG_INPUT_MOUSEDEV_PSAUX=y
++CONFIG_INPUT_MOUSEDEV_SCREEN_X=1024
++CONFIG_INPUT_MOUSEDEV_SCREEN_Y=768
++CONFIG_INPUT_EVDEV=y
++# Input Device Drivers
++#
++CONFIG_INPUT_KEYBOARD=y
++CONFIG_KEYBOARD_ATKBD=y
+-- 
+2.7.4
+
+
+From 79f914bdc6693351de77089b6f34e4b1d4fd76a9 Mon Sep 17 00:00:00 2001
+From: ben <joeisgood99@gmail.com>
+Date: Mon, 12 Dec 2016 21:36:42 +1100
+Subject: [PATCH 3/3] fix bt usb module errors, fix derp in usb gadget patch
+ and add mac80210 patch
+
+---
+ drivers/bluetooth/btusb.c    | 17 ++---------------
+ drivers/usb/gadget/android.c |  3 ---
+ net/mac80211/tx.c            | 14 +++++++++++---
+ 3 files changed, 13 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/bluetooth/btusb.c b/drivers/bluetooth/btusb.c
+index cd267c9..feec346 100644
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ -38,7 +38,7 @@ static bool disable_scofix;
+ static bool force_scofix;
+ 
+ static int sco_conn;
+-static int reset = 1;
++static bool reset = true;
+ 
+ static struct usb_driver btusb_driver;
+ 
+@@ -1357,7 +1357,6 @@ static int btusb_probe(struct usb_interface *intf,
+ 	struct btusb_data *data;
+ 	struct hci_dev *hdev;
+ 	int i, err;
+-	struct ath3k_version version;
+ 
+ 	BT_DBG("intf %p id %p", intf, id);
+ 
+@@ -1388,20 +1387,8 @@ static int btusb_probe(struct usb_interface *intf,
+ 		struct usb_device *udev = interface_to_usbdev(intf);
+ 		/* Old firmware would otherwise let ath3k driver load
+ 		 * patch and sysconfig files */
+-		err = get_rome_version(udev, &version);
+-		if (err < 0) {
+-			if (le16_to_cpu(udev->descriptor.bcdDevice) <= 0x0001)
+-				BT_INFO("FW for ar3k is yet to be downloaded");
+-			else
+-				BT_ERR("Failed to get ROME USB version");
+-			return -ENODEV;
+-		}
+-		BT_INFO("Rome Version: 0x%x", version.rom_version);
+-		err = rome_download(udev, &version);
+-		if (err < 0) {
+-			BT_ERR("Failed to download ROME firmware");
++		if (le16_to_cpu(udev->descriptor.bcdDevice) <= 0x0001)			
+ 			return -ENODEV;
+-		}
+ 	}
+ 
+ 	data = devm_kzalloc(&intf->dev, sizeof(*data), GFP_KERNEL);
+diff --git a/drivers/usb/gadget/android.c b/drivers/usb/gadget/android.c
+index 04ceb23..90d266a 100644
+--- a/drivers/usb/gadget/android.c
++++ b/drivers/usb/gadget/android.c
+@@ -82,9 +82,6 @@ static void eject_cdrom_timer_work(struct work_struct *w);
+ #include "f_hid_android_mouse.c"
+ #include "f_rndis.c"
+ #include "rndis.c"
+-#include "u_ether.c"
+-#include "u_bam_data.c"
+-#include "f_mbim.c"
+ #include "f_qc_ecm.c"
+ #include "f_mbim.c"
+ #include "f_qc_rndis.c"
+diff --git a/net/mac80211/tx.c b/net/mac80211/tx.c
+index 10eea23..ccd3c09 100644
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -762,11 +762,19 @@ ieee80211_tx_h_sequence(struct ieee80211_tx_data *tx)
+ 
+ 	/*
+ 	 * Packet injection may want to control the sequence
+-	 * number, if we have no matching interface then we
+-	 * neither assign one ourselves nor ask the driver to.
++	 * number, so if an injected packet is found, skip
++	 * renumbering it. Also make the packet NO_ACK to avoid
++	 * excessive retries (ACKing and retrying should be
++	 * handled by the injecting application).
++	 * FIXME This may break hostapd and some other injectors.
++	 * This should be done using a radiotap flag.
+ 	 */
+-	if (unlikely(info->control.vif->type == NL80211_IFTYPE_MONITOR))
++	if (unlikely((info->flags & IEEE80211_TX_CTL_INJECTED) &&
++	   !(tx->sdata->u.mntr_flags & MONITOR_FLAG_COOK_FRAMES))) {
++		if (!ieee80211_has_morefrags(hdr->frame_control))
++			info->flags |= IEEE80211_TX_CTL_NO_ACK;
+ 		return TX_CONTINUE;
++	}
+ 
+ 	if (unlikely(ieee80211_is_ctl(hdr->frame_control)))
+ 		return TX_CONTINUE;
+-- 
+2.7.4
+
