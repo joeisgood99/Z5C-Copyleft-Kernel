@@ -1,6 +1,6 @@
 ### Uber-GCC 4.9.x
 
-TCPATH="/home/ben/ubertc/out/aarch64-linux-android-5.x/bin/aarch64-linux-android-"
+TCPATH="/home/ben/ubertc/out/aarch64-linux-android-4.9/bin/aarch64-linux-android-"
 FINALFILES="/home/ben/development/Kernel/kernel-Source-Code/final_files"
 version="01"
 BUILD_START=$(date +"%s")

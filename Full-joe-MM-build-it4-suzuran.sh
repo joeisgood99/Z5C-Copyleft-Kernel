@@ -1,6 +1,6 @@
 ### Uber-GCC 4.9.x
 
-TCPATH="/home/ben/ubertc/out/aarch64-linux-android-5.x/bin/aarch64-linux-android-"
+TCPATH="/home/ben/ubertc/out/aarch64-linux-android-4.9/bin/aarch64-linux-android-"
 FINALFILES="/home/ben/development/Kernel/kernel-Source-Code/final_files"
 version="01"
 BUILD_START=$(date +"%s")
@@ -35,6 +35,9 @@ echo "DONE"
 fi
 ### E5823
 echo "Building boot_E5823.img from ramdisk, zImage & dt.img ..."
+echo "######################################################"
+echo "######################################################"
+echo "######################################################"
 
 ../final_files/mkbootimg --cmdline "androidboot.hardware=qcom user_debug=31 msm_rtb.filter=0x237 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 boot_cpus=0-5 dwc3_msm.prop_chg_detect=Y coherent_pool=2M dwc3_msm.hvdcp_max_current=1500 enforcing=0" --base 0x00000000 --kernel arch/arm64/boot/Image.gz-dtb --ramdisk ../final_files/5-11Ramdisk-E5823.cpio.gz --ramdisk_offset 0x02000000 --pagesize 4096 -o ../final_files/boot_E5823.img --tags_offset 0x01E00000
 
@@ -43,12 +46,14 @@ then
 
 ### Zip boot.img
 echo "Creating TWRP installable .zip cont boot.img and modules..."
+echo ""
+echo ""
 cd ../final_files/
-mv $FINALFILES/boot_E5823.img $FINALFILES/Uber6x-copyleft-5-11-boot.img
+mv $FINALFILES/boot_E5823.img $FINALFILES/Uber4x-o3graphite-copyleft-5-11-boot.img
 
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
-echo "Uber6x-Z5C_kcopyleft-5-11-boot.img built in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
+echo "Uber4x-o3graphite-Z5C_copyleft-5-11-boot.img built in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
 else
 echo "Compilation failed! Fix the errors!"
 
