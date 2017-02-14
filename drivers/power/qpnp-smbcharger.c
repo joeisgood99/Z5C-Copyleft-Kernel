@@ -155,6 +155,9 @@ struct smbchg_chip {
 	/* vfloat adjustment */
 	int				max_vbat_sample;
 	int				n_vbat_samples;
+#ifdef CONFIG_QPNP_SMBCHARGER_EXTENSION
+	int				total_trim_steps;
+#endif
 
 	/* status variables */
 	int				battchg_disabled;
@@ -2679,6 +2682,7 @@ static int smbchg_system_temp_level_set(struct smbchg_chip *chip,
 #ifdef CONFIG_QPNP_SMBCHARGER_EXTENSION
 	somc_chg_therm_set_hvdcp_en(&chip->somc_params);
 	rc = smbchg_set_thermal_limited_usb_current_max(chip, CURRENT_RESET_MA);
+	somc_chg_aicl_set_keep_state(false);
 #else
 	rc = smbchg_set_thermal_limited_usb_current_max(chip,
 					chip->usb_target_current_ma);
@@ -3690,6 +3694,11 @@ static int vf_adjust_trim_steps_per_adjust = 1;
 #endif
 module_param(vf_adjust_trim_steps_per_adjust, int, 0644);
 
+#ifdef CONFIG_QPNP_SMBCHARGER_EXTENSION
+static int vf_adjust_trim_limit = 3;
+module_param(vf_adjust_trim_limit, int, 0644);
+#endif
+
 #define CENTER_TRIM_CODE		7
 #define MAX_LIN_CODE			14
 #define MAX_TRIM_CODE			15
@@ -3776,6 +3785,9 @@ static int smbchg_adjust_vfloat_mv_trim(struct smbchg_chip *chip,
 	int sign, delta_steps, rc = 0;
 	u8 prev_trim, new_trim;
 	int i;
+#ifdef CONFIG_QPNP_SMBCHARGER_EXTENSION
+	int trim_step_inc_dec;
+#endif
 
 	sign = delta_mv > 0 ? 1 : -1;
 	delta_steps = (delta_mv + sign * VF_STEP_SIZE_MV / 2)
@@ -3797,6 +3809,18 @@ static int smbchg_adjust_vfloat_mv_trim(struct smbchg_chip *chip,
 			/* treat no trim change as an error */
 			return -EINVAL;
 		}
+
+#ifdef CONFIG_QPNP_SMBCHARGER_EXTENSION
+		trim_step_inc_dec = delta_steps > 0 ? 1 : -1;
+		if (abs(chip->total_trim_steps + trim_step_inc_dec)
+						> vf_adjust_trim_limit) {
+			pr_info("VFloat trim is max, cannot %s VFloat\n",
+						trim_step_inc_dec > 0 ?
+						"increase" : "decrease");
+			return -EINVAL;
+		}
+		chip->total_trim_steps += trim_step_inc_dec;
+#endif
 
 		rc = smbchg_sec_masked_write(chip, chip->misc_base + TRIM_14,
 				VF_TRIM_MASK, new_trim);
