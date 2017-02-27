@@ -5,10 +5,6 @@ FINALFILES="/home/ben/development/Kernel/kernel-Source-Code/final_files"
 version="01"
 BUILD_START=$(date +"%s")
 
-if [ ! -e ./arch/arm/boot/dts/msm8994-v1-kitakami_suzuran_generic.dtb ]; then
-rm ./arch/arm/boot/dts/*.dtb
-fi
-
 make clean && make mrproper
 
 export KBUILD_DIFFCONFIG=suzuran_diffconfig 
