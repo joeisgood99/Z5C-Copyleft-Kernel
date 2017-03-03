@@ -52,7 +52,7 @@ then
 
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
-echo "Z5C_kali-5-11-boot.zip completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
+echo "CopyLeft-07-zip completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
 else
 echo "Compilation failed! Fix the errors!"
 
