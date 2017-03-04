@@ -220,8 +220,6 @@ int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 	struct ac_cpu_dbs_info_s *ac_dbs_info = NULL;
 	struct od_ops *od_ops = NULL;
 	struct ac_ops *ac_ops = NULL;
-	struct dk_ops *dk_ops = NULL;
-	struct nm_ops *nm_ops = NULL;
 	struct od_dbs_tuners *od_tuners = NULL;
 	struct cs_dbs_tuners *cs_tuners = NULL;
 	struct zz_dbs_tuners *zz_tuners = NULL;
