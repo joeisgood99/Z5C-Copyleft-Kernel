@@ -39,7 +39,7 @@ then
 ### Zip boot.img
 echo "Creating TWRP installable .zip cont boot.img and modules..."
 cd ../final_files/
-mv $FINALFILES/boot_E5823.img $FINALFILES/Copyleft-7.0-boot.img
+mv $FINALFILES/boot_E5823.img $FINALFILES/Copyleft-7.0-V2-boot.img
 #zip -r Copyleft-7.0-boot.img META-INF modules 
 rm -f boot.img
 
@@ -51,7 +51,7 @@ rm -f boot.img
 
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
-echo "Z5C_kali-5-11-boot.zip completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
+echo "Copyleft-7.0-V2-boot.img $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
 else
 echo "Compilation failed! Fix the errors!"
 
