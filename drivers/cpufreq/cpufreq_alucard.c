@@ -138,7 +138,6 @@ static u64 round_to_nw_start(u64 jif,
 static void cpufreq_alucard_timer_resched(unsigned long cpu,
 					      bool slack_only)
 {
-<<<<<<< HEAD
 	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, cpu);
 	struct cpufreq_alucard_cpuinfo *pcpu;
 	struct cpufreq_alucard_tunables *tunables =
@@ -200,29 +199,10 @@ static void cpufreq_alucard_timer_start(
 		pcpu->time_in_idle =
 			get_cpu_idle_time(i, &pcpu->time_in_idle_timestamp,
 					  tunables->io_is_busy);
-=======
-	struct ac_cpu_dbs_info_s *dbs_info = &per_cpu(ac_cpu_dbs_info, cpu);
-	struct cpufreq_frequency_table *table = dbs_info->freq_table;
-	unsigned int i = 0;
-
-	for (i = 0; (table[i].frequency != CPUFREQ_TABLE_END); i++) {
-		unsigned int freq = table[i].frequency;
-		if (freq != CPUFREQ_ENTRY_INVALID) {
-			if (freq == policy->min)
-				dbs_info->min_index = i;
-			if (freq == policy->max)
-				dbs_info->max_index = i;
-
-			if (freq >= policy->min &&
-				freq >= policy->max)
-				break;
-		}
->>>>>>> parent of f83bf1a... alucard, darkness: optimized code!
 	}
 	spin_unlock_irqrestore(&ppol->load_lock, flags);
 }
 
-<<<<<<< HEAD
 static unsigned int choose_target_freq(struct cpufreq_alucard_policyinfo *pcpu,
 					unsigned int step, bool isup)
 {
@@ -257,33 +237,16 @@ static unsigned int choose_target_freq(struct cpufreq_alucard_policyinfo *pcpu,
 						}
 					}
 				}
-=======
-static void alucard_get_cpu_frequency_table_cur(struct cpufreq_policy *policy,
-					struct cpufreq_frequency_table *table,
-					unsigned int *index)
-{
-	unsigned int i = 0;
-
-	for (i = 0; (table[i].frequency != CPUFREQ_TABLE_END); i++) {
-		unsigned int freq = table[i].frequency;
-		if (freq != CPUFREQ_ENTRY_INVALID) {
-			if (freq == policy->cur) {
-				*index = i;
->>>>>>> parent of f83bf1a... alucard, darkness: optimized code!
 				break;
 			}
 		}
 	}
-<<<<<<< HEAD
 	
 	return target_freq;
-=======
->>>>>>> parent of f83bf1a... alucard, darkness: optimized code!
 }
 
 static bool update_load(int cpu)
 {
-<<<<<<< HEAD
 	struct cpufreq_alucard_policyinfo *ppol = per_cpu(polinfo, cpu);
 	struct cpufreq_alucard_cpuinfo *pcpu = &per_cpu(cpuinfo, cpu);
 	struct cpufreq_alucard_tunables *tunables =
@@ -354,26 +317,6 @@ static void cpufreq_alucard_timer(unsigned long data)
 				DEFAULT_TIMER_RATE_SUSP);
 	}
 #endif
-=======
-	struct ac_cpu_dbs_info_s *dbs_info = &per_cpu(ac_cpu_dbs_info, cpu);
-	struct cpufreq_policy *policy = dbs_info->cdbs.cur_policy;
-	struct dbs_data *dbs_data = policy->governor_data;
-	struct ac_dbs_tuners *ac_tuners = dbs_data->tuners;
-	unsigned int freq_responsiveness = ac_tuners->freq_responsiveness;
-	int dec_cpu_load = ac_tuners->dec_cpu_load;
-	int inc_cpu_load = ac_tuners->inc_cpu_load;
-	int pump_inc_step = ac_tuners->pump_inc_step;
-	int pump_dec_step = ac_tuners->pump_dec_step;
-	unsigned int cpus_up_rate = ac_tuners->cpus_up_rate;
-	unsigned int cpus_down_rate = ac_tuners->cpus_down_rate;
-	unsigned int index = 0;
-
-	/* Get min, current, max indexes from current cpu policy */
-	alucard_get_cpu_frequency_table_cur(policy,
-				dbs_info->freq_table,
-				&index);
-
->>>>>>> parent of f83bf1a... alucard, darkness: optimized code!
 	/* CPUs Online Scale Frequency*/
 	target_cpu_load = (ppol->policy->cur * 100) / ppol->policy->max;
 	if (ppol->policy->cur < freq_responsiveness) {
