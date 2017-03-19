@@ -8,7 +8,7 @@ BUILD_START=$(date +"%s")
 make clean && make mrproper
 
 export KBUILD_DIFFCONFIG=suzuran_diffconfig 
-make msm8994-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
+make msm8994-KaliV2-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
 
 make -j6 ARCH=arm64 CROSS_COMPILE=$TCPATH
 
@@ -39,7 +39,7 @@ then
 ### Zip boot.img
 echo "Creating TWRP installable .zip cont boot.img and modules..."
 cd ../final_files/
-mv $FINALFILES/boot_E5823.img $FINALFILES/Copyleft-7.0-V2-boot.img
+mv $FINALFILES/boot_E5823.img $FINALFILES/NH-Nougat-boot.img
 #zip -r Copyleft-7.0-boot.img META-INF modules 
 rm -f boot.img
 
