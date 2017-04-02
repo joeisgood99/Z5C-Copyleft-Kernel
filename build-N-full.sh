@@ -2,13 +2,16 @@
 
 TCPATH="/home/ben/ubertc/out/aarch64-linux-android-4.9/bin/aarch64-linux-android-"
 FINALFILES="/home/ben/development/Kernel/kernel-Source-Code/final_files"
-version="01"
+V="v7"
 BUILD_START=$(date +"%s")
 
 make clean && make mrproper
 
 export KBUILD_DIFFCONFIG=suzuran_diffconfig
-make msm8994-KakiV3-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
+
+#make msm8994-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
+#make msm8994-KakiV3-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
+make msm8994-Kali-nougat-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
 
 make -j6 ARCH=arm64 CROSS_COMPILE=$TCPATH
 
@@ -39,7 +42,7 @@ then
 ### Zip boot.img
 echo "Creating TWRP installable .zip cont boot.img and modules..."
 cd ../final_files/
-mv $FINALFILES/boot_E5823.img $FINALFILES/NH-Nougat-boot.img
+mv $FINALFILES/boot_E5823.img $FINALFILES/NH$V-Nougat-boot.img
 #zip -r Copyleft-7.0-boot.img META-INF modules 
 rm -f boot.img
 
