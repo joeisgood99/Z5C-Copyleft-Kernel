@@ -10,7 +10,6 @@ make clean && make mrproper
 export KBUILD_DIFFCONFIG=suzuran_diffconfig
 
 #make msm8994-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
-#make msm8994-KakiV3-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
 make msm8994-Kali-nougat-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
 
 make -j6 ARCH=arm64 CROSS_COMPILE=$TCPATH

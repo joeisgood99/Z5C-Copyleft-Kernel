@@ -7,8 +7,7 @@ BUILD_START=$(date +"%s")
 
 make clean && make mrproper
 
-export KBUILD_DIFFCONFIG=suzuran_diffconfig 
-#make msm8994-KakiV3-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
+export KBUILD_DIFFCONFIG=suzuran_diffconfig
 make msm8994-Kali-nougat-perf_defconfig ARCH=arm64 CROSS_COMPILE=$TCPATH
 
 make ARCH=arm64 CROSS_COMPILE=$TCPATH
