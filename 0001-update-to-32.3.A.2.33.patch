@@ -1,0 +1,353 @@
+From 7dde2dca3a20c4dd7f684f74fe54dd78cba28f82 Mon Sep 17 00:00:00 2001
+From: ben <joeisgood99@gmail.com>
+Date: Thu, 13 Apr 2017 13:32:31 +1000
+Subject: [PATCH] update to 32.3.A.2.33
+
+---
+ README_Xperia                                   |  2 +-
+ arch/arm64/configs/diffconfig/common_diffconfig |  2 +-
+ arch/arm64/configs/msm8994_defconfig            |  2 +-
+ drivers/misc/qcom/qdsp6v2/ultrasound/usf.c      | 66 ++++++++++++++++++++++---
+ drivers/misc/qseecom.c                          | 11 ++++-
+ drivers/soc/qcom/scm.c                          | 12 ++---
+ fs/aio.c                                        |  4 ++
+ fs/proc/array.c                                 | 10 ++--
+ 8 files changed, 84 insertions(+), 25 deletions(-)
+
+diff --git a/README_Xperia b/README_Xperia
+index 80197db..934e55c 100644
+--- a/README_Xperia
++++ b/README_Xperia
+@@ -49,7 +49,7 @@ How to build your kernel:
+ 
+     $ make
+ 
+-    You can see arch/arm64/boot/Image-dtb if you succeed in building.
++    You can see arch/arm64/boot/Image.gz-dtb if you succeed in building.
+ 
+ 
+   Step 2: Assembling the boot.img
+diff --git a/arch/arm64/configs/diffconfig/common_diffconfig b/arch/arm64/configs/diffconfig/common_diffconfig
+index b3cd3db..7e83df5 100644
+--- a/arch/arm64/configs/diffconfig/common_diffconfig
++++ b/arch/arm64/configs/diffconfig/common_diffconfig
+@@ -19,7 +19,7 @@ CONFIG_DYNAMIC_DEBUG=y
+ # CONFIG_EXT3_FS is not set
+ CONFIG_FB_MSM_LOGO=y
+ CONFIG_FB_MSM_MDSS_SPECIFIC_PANEL=y
+-CONFIG_FB_MSM_MDSS_XLOG_DEBUG=y
++#CONFIG_FB_MSM_MDSS_XLOG_DEBUG=y
+ CONFIG_HID_LOGITECH=y
+ CONFIG_HID_PANTHERLORD=y
+ CONFIG_HID_SONY=y
+diff --git a/arch/arm64/configs/msm8994_defconfig b/arch/arm64/configs/msm8994_defconfig
+index 1a4b782..74cce71 100644
+--- a/arch/arm64/configs/msm8994_defconfig
++++ b/arch/arm64/configs/msm8994_defconfig
+@@ -388,7 +388,7 @@ CONFIG_FB_MSM_MDSS=y
+ CONFIG_FB_MSM_MDSS_WRITEBACK=y
+ CONFIG_FB_MSM_MDSS_HDMI_PANEL=y
+ CONFIG_FB_MSM_MDSS_MHL3=y
+-CONFIG_FB_MSM_MDSS_XLOG_DEBUG=y
++#CONFIG_FB_MSM_MDSS_XLOG_DEBUG=y
+ CONFIG_SOUND=y
+ CONFIG_SND=y
+ CONFIG_SND_USB_AUDIO=y
+diff --git a/drivers/misc/qcom/qdsp6v2/ultrasound/usf.c b/drivers/misc/qcom/qdsp6v2/ultrasound/usf.c
+index d535ccb..9270dbc 100644
+--- a/drivers/misc/qcom/qdsp6v2/ultrasound/usf.c
++++ b/drivers/misc/qcom/qdsp6v2/ultrasound/usf.c
+@@ -22,6 +22,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/time.h>
+ #include <linux/kmemleak.h>
++#include <linux/mutex.h>
+ #include <sound/apr_audio.h>
+ #include <linux/qdsp6v2/usf.h>
+ #include "q6usm.h"
+@@ -128,6 +129,8 @@ struct usf_type {
+ 	uint16_t conflicting_event_filters;
+ 	/* The requested buttons bitmap */
+ 	uint16_t req_buttons_bitmap;
++	/* Mutex for exclusive operations (all public APIs) */
++	struct mutex mutex;
+ };
+ 
+ struct usf_input_dev_type {
+@@ -1376,9 +1379,22 @@ static int __usf_set_stream_param(struct usf_xx_type *usf_xx,
+ 				int dir)
+ {
+ 	struct us_client *usc = usf_xx->usc;
+-	struct us_port_data *port = &usc->port[dir];
++	struct us_port_data *port;
+ 	int rc = 0;
+ 
++	if (usc == NULL) {
++		pr_err("%s: usc is null\n",
++			__func__);
++		return -EFAULT;
++	}
++
++	port = &usc->port[dir];
++	if (port == NULL) {
++		pr_err("%s: port is null\n",
++			__func__);
++		return -EFAULT;
++	}
++
+ 	if (port->param_buf == NULL) {
+ 		pr_err("%s: parameter buffer is null\n",
+ 			__func__);
+@@ -1503,10 +1519,12 @@ static int usf_get_stream_param(struct usf_xx_type *usf_xx,
+ 	return __usf_get_stream_param(usf_xx, &get_stream_param, dir);
+ } /* usf_get_stream_param */
+ 
+-static long usf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++static long __usf_ioctl(struct usf_type *usf,
++		unsigned int cmd,
++		unsigned long arg)
+ {
++
+ 	int rc = 0;
+-	struct usf_type *usf = file->private_data;
+ 	struct usf_xx_type *usf_xx = NULL;
+ 
+ 	switch (cmd) {
+@@ -1669,6 +1687,18 @@ static long usf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+ 		release_xx(usf_xx);
+ 
+ 	return rc;
++} /* __usf_ioctl */
++
++static long usf_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
++{
++	struct usf_type *usf = file->private_data;
++	int rc = 0;
++
++	mutex_lock(&usf->mutex);
++	rc = __usf_ioctl(usf, cmd, arg);
++	mutex_unlock(&usf->mutex);
++
++	return rc;
+ } /* usf_ioctl */
+ 
+ #ifdef CONFIG_COMPAT
+@@ -2106,12 +2136,11 @@ static int usf_get_stream_param32(struct usf_xx_type *usf_xx,
+ 	return __usf_get_stream_param(usf_xx, &get_stream_param, dir);
+ } /* usf_get_stream_param32 */
+ 
+-static long usf_compat_ioctl(struct file *file,
++static long __usf_compat_ioctl(struct usf_type *usf,
+ 			     unsigned int cmd,
+ 			     unsigned long arg)
+ {
+ 	int rc = 0;
+-	struct usf_type *usf = file->private_data;
+ 	struct usf_xx_type *usf_xx = NULL;
+ 
+ 	switch (cmd) {
+@@ -2119,7 +2148,7 @@ static long usf_compat_ioctl(struct file *file,
+ 	case US_START_RX:
+ 	case US_STOP_TX:
+ 	case US_STOP_RX: {
+-		return usf_ioctl(file, cmd, arg);
++		return __usf_ioctl(usf, cmd, arg);
+ 	}
+ 
+ 	case US_SET_TX_INFO32: {
+@@ -2228,6 +2257,20 @@ static long usf_compat_ioctl(struct file *file,
+ 		release_xx(usf_xx);
+ 
+ 	return rc;
++} /* __usf_compat_ioctl */
++
++static long usf_compat_ioctl(struct file *file,
++			     unsigned int cmd,
++			     unsigned long arg)
++{
++	struct usf_type *usf = file->private_data;
++	int rc = 0;
++
++	mutex_lock(&usf->mutex);
++	rc = __usf_compat_ioctl(usf, cmd, arg);
++	mutex_unlock(&usf->mutex);
++
++	return rc;
+ } /* usf_compat_ioctl */
+ #endif /* CONFIG_COMPAT */
+ 
+@@ -2236,13 +2279,17 @@ static int usf_mmap(struct file *file, struct vm_area_struct *vms)
+ 	struct usf_type *usf = file->private_data;
+ 	int dir = OUT;
+ 	struct usf_xx_type *usf_xx = &usf->usf_tx;
++	int rc = 0;
+ 
++	mutex_lock(&usf->mutex);
+ 	if (vms->vm_flags & USF_VM_WRITE) { /* RX buf mapping */
+ 		dir = IN;
+ 		usf_xx = &usf->usf_rx;
+ 	}
++	rc = q6usm_get_virtual_address(dir, usf_xx->usc, vms);
++	mutex_unlock(&usf->mutex);
+ 
+-	return q6usm_get_virtual_address(dir, usf_xx->usc, vms);
++	return rc;
+ }
+ 
+ static uint16_t add_opened_dev(int minor)
+@@ -2294,6 +2341,8 @@ static int usf_open(struct inode *inode, struct file *file)
+ 	usf->usf_tx.us_detect_type = USF_US_DETECT_UNDEF;
+ 	usf->usf_rx.us_detect_type = USF_US_DETECT_UNDEF;
+ 
++	mutex_init(&usf->mutex);
++
+ 	pr_debug("%s:usf in open\n", __func__);
+ 	return 0;
+ }
+@@ -2304,6 +2353,7 @@ static int usf_release(struct inode *inode, struct file *file)
+ 
+ 	pr_debug("%s: release entry\n", __func__);
+ 
++	mutex_lock(&usf->mutex);
+ 	usf_release_input(usf);
+ 
+ 	usf_disable(&usf->usf_tx);
+@@ -2311,6 +2361,8 @@ static int usf_release(struct inode *inode, struct file *file)
+ 
+ 	s_opened_devs[usf->dev_ind] = 0;
+ 
++	mutex_unlock(&usf->mutex);
++	mutex_destroy(&usf->mutex);
+ 	kfree(usf);
+ 	pr_debug("%s: release exit\n", __func__);
+ 	return 0;
+diff --git a/drivers/misc/qseecom.c b/drivers/misc/qseecom.c
+index a80be8d..c543216 100644
+--- a/drivers/misc/qseecom.c
++++ b/drivers/misc/qseecom.c
+@@ -1329,6 +1329,7 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
+ 	struct qseecom_command_scm_resp resp;
+ 	struct qseecom_check_app_ireq req;
+ 	struct qseecom_load_app_ireq load_req;
++	bool first_time = false;
+ 
+ 	/* Copy the relevant information needed for loading the image */
+ 	if (copy_from_user(&load_img_req,
+@@ -1375,6 +1376,7 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
+ 		&qseecom.registered_app_list_lock, flags);
+ 		ret = 0;
+ 	} else {
++		first_time = true;
+ 		pr_warn("App (%s) does'nt exist, loading apps for first time\n",
+ 			(char *)(load_img_req.img_name));
+ 		/* Get the handle of the shared fd */
+@@ -1475,8 +1477,15 @@ static int qseecom_load_app(struct qseecom_dev_handle *data, void __user *argp)
+ 	load_img_req.app_id = app_id;
+ 	if (copy_to_user(argp, &load_img_req, sizeof(load_img_req))) {
+ 		pr_err("copy_to_user failed\n");
+-		kzfree(entry);
+ 		ret = -EFAULT;
++		if (first_time == true) {
++			spin_lock_irqsave(
++				&qseecom.registered_app_list_lock, flags);
++			list_del(&entry->list);
++			spin_unlock_irqrestore(
++				&qseecom.registered_app_list_lock, flags);
++			kzfree(entry);
++		}
+ 	}
+ 
+ loadapp_err:
+diff --git a/drivers/soc/qcom/scm.c b/drivers/soc/qcom/scm.c
+index ed81d70..414c697 100644
+--- a/drivers/soc/qcom/scm.c
++++ b/drivers/soc/qcom/scm.c
+@@ -1,4 +1,4 @@
+-/* Copyright (c) 2010-2015, The Linux Foundation. All rights reserved.
++/* Copyright (c) 2010-2016, The Linux Foundation. All rights reserved.
+  *
+  * This program is free software; you can redistribute it and/or modify
+  * it under the terms of the GNU General Public License version 2 and
+@@ -641,10 +641,6 @@ int scm_call2(u32 fn_id, struct scm_desc *desc)
+ 
+ 		desc->ret[0] = desc->ret[1] = desc->ret[2] = 0;
+ 
+-		pr_debug("scm_call: func id %#llx, args: %#x, %#llx, %#llx, %#llx, %#llx\n",
+-			x0, desc->arginfo, desc->args[0], desc->args[1],
+-			desc->args[2], desc->x5);
+-
+ 		if (scm_version == SCM_ARMV8_64)
+ 			ret = __scm_call_armv8_64(x0, desc->arginfo,
+ 						  desc->args[0], desc->args[1],
+@@ -664,10 +660,8 @@ int scm_call2(u32 fn_id, struct scm_desc *desc)
+ 	}  while (ret == SCM_V2_EBUSY && (retry_count++ < SCM_EBUSY_MAX_RETRY));
+ 
+ 	if (ret < 0)
+-		pr_err("scm_call failed: func id %#llx, arginfo: %#x, args: %#llx, %#llx, %#llx, %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\n",
+-			x0, desc->arginfo, desc->args[0], desc->args[1],
+-			desc->args[2], desc->x5, ret, desc->ret[0],
+-			desc->ret[1], desc->ret[2]);
++		pr_err("scm_call failed: func id %#llx, ret: %d, syscall returns: %#llx, %#llx, %#llx\n",
++			x0, ret, desc->ret[0], desc->ret[1], desc->ret[2]);
+ 
+ 	if (arglen > N_REGISTER_ARGS)
+ 		kfree(desc->extra_arg_buf);
+diff --git a/fs/aio.c b/fs/aio.c
+index 9798d4e..0f2c38f 100644
+--- a/fs/aio.c
++++ b/fs/aio.c
+@@ -35,6 +35,7 @@
+ #include <linux/eventfd.h>
+ #include <linux/blkdev.h>
+ #include <linux/compat.h>
++#include <linux/personality.h>
+ 
+ #include <asm/kmap_types.h>
+ #include <asm/uaccess.h>
+@@ -153,6 +154,9 @@ static int aio_setup_ring(struct kioctx *ctx)
+ 	unsigned long size, populate;
+ 	int nr_pages;
+ 
++	if (current->personality & READ_IMPLIES_EXEC)
++		return -EPERM;
++
+ 	/* Compensate for the ring buffer's head/tail overlap entry */
+ 	nr_events += 2;	/* 1 is required, 2 for good luck */
+ 
+diff --git a/fs/proc/array.c b/fs/proc/array.c
+index 09f0d9c..6ed9580 100644
+--- a/fs/proc/array.c
++++ b/fs/proc/array.c
+@@ -168,16 +168,16 @@ static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
+ 	int g;
+ 	struct fdtable *fdt = NULL;
+ 	const struct cred *cred;
+-	pid_t ppid, tpid;
++	pid_t ppid = 0, tpid = 0;
++	struct task_struct *leader = NULL;
+ 
+ 	rcu_read_lock();
+-	ppid = pid_alive(p) ?
+-		task_tgid_nr_ns(rcu_dereference(p->real_parent), ns) : 0;
+-	tpid = 0;
+ 	if (pid_alive(p)) {
+ 		struct task_struct *tracer = ptrace_parent(p);
+ 		if (tracer)
+ 			tpid = task_pid_nr_ns(tracer, ns);
++		ppid = task_tgid_nr_ns(rcu_dereference(p->real_parent), ns);
++		leader = p->group_leader;
+ 	}
+ 	cred = get_task_cred(p);
+ 	seq_printf(m,
+@@ -189,7 +189,7 @@ static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
+ 		"Uid:\t%d\t%d\t%d\t%d\n"
+ 		"Gid:\t%d\t%d\t%d\t%d\n",
+ 		get_task_state(p),
+-		task_tgid_nr_ns(p, ns),
++		leader ? task_pid_nr_ns(leader, ns) : 0,
+ 		pid_nr_ns(pid, ns),
+ 		ppid, tpid,
+ 		from_kuid_munged(user_ns, cred->uid),
+-- 
+2.7.4
+
