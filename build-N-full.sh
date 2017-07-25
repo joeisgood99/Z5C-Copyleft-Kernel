@@ -51,7 +51,7 @@ rm -f boot.img
 
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
-echo "MyCopyleft-N-boot.img $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
+echo "MyCopyleft-N-v85-boot.img $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
 else
 echo "Compilation failed! Fix the errors!"
 
