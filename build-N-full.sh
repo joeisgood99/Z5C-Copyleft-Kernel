@@ -39,7 +39,7 @@ then
 ### Zip boot.img
 echo "Creating TWRP installable .zip cont boot.img and modules..."
 cd ../final_files/
-mv $FINALFILES/boot_E5823.img $FINALFILES/CopyLeft_33-3-A-2-33_3-10-86_boot.img
+mv $FINALFILES/boot_E5823.img $FINALFILES/CopyLeft_32-3-A-2-33_v3-10-87_boot.img
 #zip -r Copyleft-7.0-boot.img META-INF modules 
 rm -f boot.img
 
@@ -51,7 +51,7 @@ rm -f boot.img
 
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
-echo "CopyLeft_33-3-A-2-33_3-10-86_boot.img $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
+echo "CopyLeft_32-3-A-2-33_3-10-v87_boot.img $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
 else
 echo "Compilation failed! Fix the errors!"
 
