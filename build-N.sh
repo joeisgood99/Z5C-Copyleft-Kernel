@@ -52,7 +52,7 @@ then
 
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
-echo "CopyLeft 33.3.A.2.33 3.10.86 completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
+echo "CopyLeft 33.3.A.2.33 3.10.91 completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
 else
 echo "Compilation failed! Fix the errors!"
 
